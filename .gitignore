@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+rag_env/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database files (содержат ваши документы)
+documents.db
+*.db-journal
+
+# Vector database (пересоздается автоматически)
+chroma_db/
+
+# User documents (ваши личные файлы)
+my_docs/
+
+# Environment variables (содержат секреты)
+.env
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
