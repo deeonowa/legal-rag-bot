@@ -134,7 +134,7 @@ class RAGPipeline:
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ""]
         )
         self.all_splits = text_splitter.split_documents(docs)
         print(f"🔪 Текст разбит на {len(self.all_splits)} чанков")
