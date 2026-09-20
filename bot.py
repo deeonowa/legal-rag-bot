@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -26,116 +26,113 @@ logger = logging.getLogger(__name__)
 # Глобальный объект RAG-пайплайна
 rag_pipeline = None
 
-
-async def initialize_rag():
-    """Инициализация RAG-системы при старте бота"""
-    global rag_pipeline
-    logger.info(" Инициализация RAG-системы...")
-    rag_pipeline = RAGPipeline(
-        db_path=os.getenv("DB_PATH", "documents.db"),
-        persist_directory=os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-    )
-    rag_pipeline.build_rag_chain()
-    logger.info("✅ RAG-система готова к работе")
+# ✅ ВЫДЕЛЕННЫЕ ПУЛЫ ПОТОКОВ (Гарантируют, что задачи не блокируют друг друга)
+rag_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="RAG_Worker")
+db_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="DB_Worker")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start — приветствие"""
+    logger.info("Получена команда /start")
     welcome_text = (
         "👋 Привет! Я — юридический ассистент на базе локальной RAG-системы.\n\n"
-        "Я могу отвечать на вопросы по загруженным документам (149-ФЗ, 152-ФЗ, 187-ФЗ и др.).\n\n"
+        "Я могу отвечать на вопросы по загруженным документам.\n\n"
         "📌 Доступные команды:\n"
         "/help — подробная справка\n"
         "/stats — статистика базы знаний\n"
         "/rebuild — пересоздать векторное хранилище\n\n"
-        " Просто напишите ваш вопрос, и я найду ответ в документах!"
+        "💬 Просто напишите ваш вопрос, и я найду ответ в документах!"
     )
     await update.message.reply_text(welcome_text)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help — справка"""
+    logger.info("Получена команда /help")
     help_text = (
-        "📚 **Справка по боту**\n\n"
-        "**Как пользоваться:**\n"
+        "📚 Справка по боту\n\n"
+        "Как пользоваться:\n"
         "Просто напишите вопрос текстом, например:\n"
         "• «Какой срок исковой давности?»\n"
-        "• «Что будет, если не заплатить налог вовремя?»\n"
-        "• «Какие случаи освобождают от согласия на обработку ПДн?»\n\n"
-        "**Команды:**\n"
+        "• «Что будет, если не заплатить налог вовремя?»\n\n"
+        "Команды:\n"
         "/start — приветствие\n"
         "/help — эта справка\n"
         "/stats — сколько документов в базе\n"
-        "/rebuild — пересоздать хранилище (после добавления новых документов)\n\n"
-        "**Важно:**\n"
-        "• Ответы основаны ТОЛЬКО на загруженных документах\n"
-        "• Если информации нет в базе, я так и скажу\n"
-        "• В ответе будут указаны номера статей и пунктов"
+        "/rebuild — пересоздать хранилище\n\n"
+        "Важно: Ответы основаны ТОЛЬКО на загруженных документах."
     )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    # Убран parse_mode, чтобы избежать любых ошибок парсинга
+    await update.message.reply_text(help_text)
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /stats — статистика базы знаний"""
+    logger.info("Получена команда /stats")
     await update.message.reply_text("📊 Собираю статистику...")
     
-    loop = asyncio.get_event_loop()
-    doc_count = await loop.run_in_executor(None, rag_pipeline.db.get_document_count)
-    docs = rag_pipeline.db.get_all_documents()
-    
-    stats_text = f"📊 **Статистика базы знаний**\n\n"
-    stats_text += f"📁 Всего документов: **{doc_count}**\n"
-    
-    if rag_pipeline.vectorstore is not None:
-        chunks_count = rag_pipeline.vectorstore._collection.count()
-        stats_text += f"🔪 Всего чанков: **{chunks_count}**\n\n"
-    else:
-        stats_text += f"️ Векторное хранилище не загружено\n\n"
-    
-    stats_text += "**Список документов:**\n"
-    for doc in docs:
-        size_kb = len(doc['content']) / 1024
-        stats_text += f"• {doc['title']} ({size_kb:.1f} КБ)\n"
-    
-    if len(stats_text) > 4000:
-        stats_text = stats_text[:4000] + "\n... (список обрезан)"
-    
-    await update.message.reply_text(stats_text, parse_mode='Markdown')
+    try:
+        # ✅ ИСПРАВЛЕНО: get_running_loop() и явное использование db_executor
+        loop = asyncio.get_running_loop()
+        doc_count = await loop.run_in_executor(db_executor, rag_pipeline.db.get_document_count)
+        docs = await loop.run_in_executor(db_executor, rag_pipeline.db.get_all_documents)
+        
+        stats_text = f"📊 Статистика базы знаний\n\n"
+        stats_text += f"📁 Всего документов: {doc_count}\n"
+        
+        if rag_pipeline.vectorstore is not None:
+            chunks_count = await loop.run_in_executor(db_executor, rag_pipeline.vectorstore._collection.count)
+            stats_text += f"🔪 Всего чанков: {chunks_count}\n\n"
+        else:
+            stats_text += f"⚠️ Векторное хранилище не загружено\n\n"
+        
+        stats_text += "Список документов:\n"
+        for doc in docs:
+            size_kb = len(doc['content']) / 1024
+            stats_text += f"• {doc['title']} ({size_kb:.1f} КБ)\n"
+        
+        if len(stats_text) > 4000:
+            stats_text = stats_text[:4000] + "\n... (список обрезан)"
+        
+        await update.message.reply_text(stats_text)
+    except Exception as e:
+        logger.error(f"Ошибка в /stats: {e}")
+        await update.message.reply_text("❌ Не удалось получить статистику.")
 
 
 async def rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /rebuild — пересоздание векторного хранилища"""
+    logger.info("Получена команда /rebuild")
     await update.message.reply_text(
         "🔄 Начинаю пересоздание векторного хранилища...\n"
         "Это может занять 1-2 минуты. Пожалуйста, подождите."
     )
     
     try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, rag_pipeline.force_rebuild)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(rag_executor, rag_pipeline.force_rebuild)
         
         await update.message.reply_text(
             "✅ Векторное хранилище успешно пересоздано!\n"
             "Теперь можете задавать вопросы по обновлённым документам."
         )
     except Exception as e:
-        await update.message.reply_text(f" Ошибка при пересоздании: {e}")
+        logger.error(f"Ошибка в /rebuild: {e}")
+        await update.message.reply_text(f"❌ Ошибка при пересоздании: {e}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка обычных текстовых сообщений через RAG"""
+    logger.info(f"Получено сообщение: {update.message.text[:50]}...")
     user_question = update.message.text.strip()
     
     if not user_question:
         await update.message.reply_text("Пожалуйста, задайте вопрос текстом.")
         return
     
-    await update.message.reply_text("🤔 Ищу ответ в документах...")
+    # ✅ ВОЗВРАЩЕНО: текстовое сообщение "🤔 Думаю..." вместо send_chat_action
+    thinking_msg = await update.message.reply_text("🤔 Думаю...")
     
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        # ✅ ИСПРАВЛЕНО: явное использование rag_executor вместо None
         result = await loop.run_in_executor(
-            None, 
+            rag_executor, 
             rag_pipeline.ask_with_sources, 
             user_question
         )
@@ -144,7 +141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = f"💡 {answer}\n"
         
         if result['sources_count'] > 0:
-            response += f"\n📚 **Источники ({result['sources_count']}):**\n"
+            response += f"\n📚 Источники ({result['sources_count']}):\n"
             for i, source in enumerate(result['sources'], 1):
                 response += f"{i}. {source['title']}\n"
         else:
@@ -153,10 +150,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(response) > 4000:
             response = response[:4000] + "\n... (ответ обрезан)"
         
+        # ✅ Удаляем сообщение "Думаю..." и отправляем ответ
+        await thinking_msg.delete()
         await update.message.reply_text(response)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке вопроса: {e}")
+        # ✅ Удаляем сообщение "Думаю..." даже при ошибке
+        await thinking_msg.delete()
         await update.message.reply_text(
             f"❌ Произошла ошибка при обработке вопроса.\n"
             f"Попробуйте переформулировать или используйте /rebuild."
@@ -164,26 +165,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ошибок"""
     logger.warning(f'Update {update} caused error: {context.error}')
     if update and update.message:
-        await update.message.reply_text(
-            "❌ Произошла внутренняя ошибка. Попробуйте позже."
-        )
+        await update.message.reply_text("❌ Произошла внутренняя ошибка. Попробуйте позже.")
 
 
 def main():
-    """Запуск бота"""
-    # Получаем токен из переменных окружения
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
     if not TOKEN:
-        print("❌ Ошибка: токен бота не найден!")
-        print("1. Создайте файл .env в корне проекта")
-        print("2. Добавьте в него строку: TELEGRAM_BOT_TOKEN=ваш_токен")
-        print("3. Получите токен у @BotFather в Telegram")
-        print("\nПример .env файла:")
-        print("TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")
+        print(" Ошибка: токен бота не найден в файле .env!")
         return
     
     print("🚀 Инициализация RAG-системы...")
